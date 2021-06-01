@@ -2,10 +2,13 @@ package com.jason.service.impl;
 
 import com.jason.dao.ItemDOMapper;
 import com.jason.dao.ItemStockDOMapper;
+import com.jason.dao.StockLogDOMapper;
 import com.jason.dataobject.ItemDO;
 import com.jason.dataobject.ItemStockDO;
+import com.jason.dataobject.StockLogDO;
 import com.jason.error.BusinessException;
 import com.jason.error.EmBusinessError;
+import com.jason.mq.MqProducer;
 import com.jason.service.ItemService;
 import com.jason.service.PromoService;
 import com.jason.service.model.ItemModel;
@@ -14,11 +17,14 @@ import com.jason.validator.ValidationResult;
 import com.jason.validator.ValidatorImpl;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
@@ -35,6 +41,15 @@ public class ItemServiceImpl implements ItemService {
 
     @Autowired
     private PromoService promoService;
+
+    @Autowired
+    private RedisTemplate redisTemplate;
+
+    @Autowired
+    private MqProducer mqProducer;
+
+    @Autowired
+    private StockLogDOMapper stockLogDOMapper;
 
     private ItemDO convertItemDOFromItemModel(ItemModel itemModel){
         if(itemModel == null){
@@ -125,21 +140,76 @@ public class ItemServiceImpl implements ItemService {
     }
 
     @Override
+    public ItemModel getItemByIdInCache(Integer id) {
+        ItemModel itemModel = (ItemModel) redisTemplate.opsForValue().get("item_validate_"+id);
+        if (itemModel == null) {
+            itemModel = this.getItemById(id);
+            redisTemplate.opsForValue().set("item_validate_"+id, itemModel);
+            redisTemplate.expire("item_validate_"+id, 10, TimeUnit.MINUTES);
+        }
+        return itemModel;
+    }
+
+    @Override
     public boolean decreaseStock(Integer itemId, Integer amount) throws BusinessException {
-        int affectedRow =  itemStockDOMapper.decreaseStock(itemId,amount);
-        if(affectedRow > 0){
+        //int affectedRow =  itemStockDOMapper.decreaseStock(itemId,amount);
+//        if(affectedRow > 0){
+//            //更新库存成功
+//            return true;
+//        }else{
+//            //更新库存失败
+//            return false;
+//        }
+        long result = redisTemplate.opsForValue().increment("promo_item_stock_"+itemId,amount.intValue()* -1);
+        if (result >= 0) {
+
+//            boolean mqResult = mqProducer.asyncReduceStock(itemId,amount);
+//            if (!mqResult){
+//                //消息发送失败，需要回滚Redis
+//                redisTemplate.opsForValue().increment("promo_item_stock_"+itemId,amount.intValue());
+//                return false;
+//            }
             //更新库存成功
             return true;
         }else{
             //更新库存失败
+            increaseStock(itemId, amount);
             return false;
         }
+    }
+
+    @Override
+    public boolean asyncDecreaseStock(Integer itemId, Integer amount) {
+        boolean mqResult = mqProducer.asyncReduceStock(itemId,amount);
+        return mqResult;
+    }
+
+    @Override
+    public boolean increaseStock(Integer itemId, Integer amount) throws BusinessException {
+        redisTemplate.opsForValue().increment("promo_item_stock_"+itemId,amount.intValue());
+        return true;
     }
 
     @Override
     @Transactional
     public void increaseSales(Integer itemId, Integer amount) throws BusinessException {
         itemDOMapper.increaseSales(itemId,amount);
+    }
+
+    //初始化对应的库存流水
+    @Override
+    @Transactional
+    public String initStockLog(Integer itemId, Integer amount) {
+        StockLogDO stockLogDO = new StockLogDO();
+        stockLogDO.setItemId(itemId);
+        stockLogDO.setAmount(amount);
+        stockLogDO.setStockLogId(UUID.randomUUID().toString().replace("-",""));
+        //1表示初始状态，2表示下单扣减库存成功，3表示下单回滚
+        stockLogDO.setStatus(1);
+
+        stockLogDOMapper.insertSelective(stockLogDO);
+
+        return stockLogDO.getStockLogId();
     }
 
 

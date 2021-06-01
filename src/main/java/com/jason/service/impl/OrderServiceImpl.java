@@ -2,8 +2,10 @@ package com.jason.service.impl;
 
 import com.jason.dao.OrderDOMapper;
 import com.jason.dao.SequenceDOMapper;
+import com.jason.dao.StockLogDOMapper;
 import com.jason.dataobject.OrderDO;
 import com.jason.dataobject.SequenceDO;
+import com.jason.dataobject.StockLogDO;
 import com.jason.error.BusinessException;
 import com.jason.error.EmBusinessError;
 import com.jason.service.ItemService;
@@ -17,6 +19,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronizationAdapter;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -37,16 +41,21 @@ public class OrderServiceImpl implements OrderService{
     @Autowired
     private OrderDOMapper orderDOMapper;
 
+    @Autowired
+    private StockLogDOMapper stockLogDOMapper;
+
     @Override
     @Transactional
-    public OrderModel createOrder(Integer userId, Integer itemId, Integer promoId, Integer amount) throws BusinessException {
+    public OrderModel createOrder(Integer userId, Integer itemId, Integer promoId, Integer amount, String stockLogId) throws BusinessException {
         //1.校验下单状态,下单的商品是否存在，用户是否合法，购买数量是否正确
-        ItemModel itemModel = itemService.getItemById(itemId);
+        //ItemModel itemModel = itemService.getItemById(itemId);
+        ItemModel itemModel = itemService.getItemByIdInCache(itemId);
         if(itemModel == null){
             throw new BusinessException(EmBusinessError.PARAMETER_VALIDATION_ERROR,"商品信息不存在");
         }
 
-        UserModel userModel = userService.getUserById(userId);
+        //UserModel userModel = userService.getUserById(userId);
+        UserModel userModel = userService.getUserByIdInCache(userId);
         if(userModel == null){
             throw new BusinessException(EmBusinessError.PARAMETER_VALIDATION_ERROR,"用户信息不存在");
         }
@@ -66,6 +75,7 @@ public class OrderServiceImpl implements OrderService{
         }
 
         //2.落单减库存
+        //redis减库存
         boolean result = itemService.decreaseStock(itemId,amount);
         if(!result){
             throw new BusinessException(EmBusinessError.STOCK_NOT_ENOUGH);
@@ -91,6 +101,30 @@ public class OrderServiceImpl implements OrderService{
 
         //加上商品的销量
         itemService.increaseSales(itemId,amount);
+
+        //设置库存流水状态为成功
+        StockLogDO stockLogDO = stockLogDOMapper.selectByPrimaryKey(stockLogId);
+        if(stockLogDO == null){
+            throw new BusinessException(EmBusinessError.UNKNOWN_ERROR);
+        }
+        //设置库存流水状态为成功
+        stockLogDO.setStatus(2);
+        stockLogDOMapper.updateByPrimaryKeySelective(stockLogDO);
+
+//        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronizationAdapter() {
+//            @Override
+//            public void afterCommit() {
+//                //异步更新库存
+//                boolean mqResult = itemService.asyncDecreaseStock(itemId, amount);
+////                if (!mqResult) {
+////                    itemService.increaseStock(itemId, amount);
+////                    throw new BusinessException(EmBusinessError.MQ_SEND_FAIL);
+////                }
+//            }
+//        });
+
+
+
         //4.返回前端
         return orderModel;
     }
